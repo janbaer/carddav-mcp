@@ -64,7 +64,7 @@ describe("registerListContacts", () => {
 
 		expect(mockClient.propfind).toHaveBeenCalledWith({
 			url: BOOK,
-			props: { "d:resourcetype": {} },
+			props: { "d:resourcetype": {}, "d:getcontenttype": {} },
 			depth: "1",
 		});
 		expect(mockClient.fetchVCards).toHaveBeenCalledWith({
@@ -139,6 +139,16 @@ describe("registerListContacts", () => {
 					ok: true,
 					props: { resourcetype: { collection: {} } },
 				},
+				{
+					href: "/dav/contacts/meta.xml",
+					ok: true,
+					props: { getcontenttype: "application/xml" },
+				},
+				{
+					href: "/dav/contacts/b.vcf",
+					ok: true,
+					props: { getcontenttype: "text/x-vcard; charset=utf-8" },
+				},
 			]),
 			fetchVCards: vi.fn().mockResolvedValue([]),
 		};
@@ -147,8 +157,85 @@ describe("registerListContacts", () => {
 
 		expect(mockClient.fetchVCards).toHaveBeenCalledWith({
 			addressBook: { url: BOOK },
-			objectUrls: ["/dav/contacts/a.vcf"],
+			objectUrls: ["/dav/contacts/a.vcf", "/dav/contacts/b.vcf"],
 		});
+	});
+
+	test("keeps a member whose href is not valid percent-encoding", async () => {
+		const mockClient = {
+			propfind: vi
+				.fn()
+				.mockResolvedValue([
+					member("/dav/contacts/100%.vcf"),
+					member("/dav/contacts/"),
+				]),
+			fetchVCards: vi.fn().mockResolvedValue([]),
+		};
+
+		await run(mockClient);
+
+		expect(mockClient.fetchVCards).toHaveBeenCalledWith({
+			addressBook: { url: BOOK },
+			objectUrls: ["/dav/contacts/100%.vcf"],
+		});
+	});
+
+	test("reports the status of a failed PROPFIND after a redirect", async () => {
+		const mockClient = {
+			propfind: vi.fn().mockResolvedValue([
+				{
+					href: "https://login.example.org/",
+					ok: false,
+					status: 401,
+					statusText: "Unauthorized",
+					raw: "",
+				},
+			]),
+			fetchVCards: vi.fn(),
+		};
+
+		await expect(run(mockClient)).rejects.toThrow(/401 Unauthorized/);
+	});
+
+	test("reports a PROPFIND answer that is not a multistatus", async () => {
+		const mockClient = {
+			propfind: vi.fn().mockResolvedValue([
+				{
+					href: "https://login.example.org/",
+					ok: true,
+					status: 200,
+					statusText: "OK",
+					raw: "<html></html>",
+				},
+			]),
+			fetchVCards: vi.fn(),
+		};
+
+		await expect(run(mockClient)).rejects.toThrow(
+			/200 OK is not a multistatus/,
+		);
+	});
+
+	test("reports a multiget answer without vCard data", async () => {
+		const mockClient = {
+			propfind: vi.fn().mockResolvedValue([member("/dav/contacts/a.vcf")]),
+			fetchVCards: vi.fn().mockResolvedValue([{ url: BOOK, data: undefined }]),
+		};
+
+		await expect(run(mockClient)).rejects.toThrow(/returned no vCard data/);
+		expect(mockClient.fetchVCards).toHaveBeenCalledTimes(1);
+	});
+
+	test("keeps the fetch error when listing again fails", async () => {
+		const mockClient = {
+			propfind: vi
+				.fn()
+				.mockResolvedValueOnce([member("/dav/contacts/a.vcf")])
+				.mockRejectedValueOnce(new Error("503 Service Unavailable")),
+			fetchVCards: vi.fn().mockRejectedValue(new Error("multiget failed: 404")),
+		};
+
+		await expect(run(mockClient)).rejects.toThrow("multiget failed: 404");
 	});
 
 	test("reports a failed PROPFIND instead of an empty list", async () => {
